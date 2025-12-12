@@ -20,8 +20,8 @@ app.post('/webhook', async (req, res) => {
 
         const conversationId = event.conversation.id;
         const accountId = event.account.id;
-        const messageContent = event.content || '[Attachment/No Content]';
-        const senderName = event.sender?.name || 'Unknown';
+        const messageContent = event.content || '[附件/无内容]';
+        const senderName = event.sender?.name || '未知';
         const senderEmail = event.sender?.email || ''; // outgoing usually has no email or agent email
 
         // Distinct format for Incoming vs Outgoing
@@ -29,7 +29,7 @@ app.post('/webhook', async (req, res) => {
         if (messageType === 'incoming') {
             text = `👤 **${senderName}** (${senderEmail})\n💬 ${messageContent}`;
         } else {
-            text = `🤖 **${senderName}** (Agent/AI)\n📤 ${messageContent}`;
+            text = `🤖 **${senderName}** (客服/AI)\n📤 ${messageContent}`;
         }
 
         try {
@@ -39,8 +39,8 @@ app.post('/webhook', async (req, res) => {
                 reply_markup: {
                     inline_keyboard: [
                         [
-                            { text: '✅ Resolve', callback_data: 'resolve' },
-                            { text: 'View in Chatwoot', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` }
+                            { text: '✅ 标记已解决', callback_data: 'resolve' },
+                            { text: '在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` }
                         ]
                     ]
                 }

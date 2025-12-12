@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { config } from './config';
 
+// Create axios client with api_access_token in headers
 const client = axios.create({
     baseURL: config.chatwootBaseUrl,
     headers: {
