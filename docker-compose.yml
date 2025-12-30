@@ -24,6 +24,8 @@ services:
     environment:
       # 环境变量也可以在这里直接设置，但推荐使用 .env 文件
       - NODE_ENV=production
+      # 可选：启用 Forum Topics 功能（需要创建启用话题的群组）
+      # - TELEGRAM_FORUM_CHAT_ID=your_forum_group_id
 
     env_file:
       # 从 .env 文件加载环境变量
@@ -31,12 +33,11 @@ services:
 
     # 健康检查（可选）
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/"]
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-
     # 资源限制（可选，根据需要调整）
     # deploy:
     #   resources:

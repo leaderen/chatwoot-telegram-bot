@@ -4,7 +4,7 @@ import http from 'http';
 import https from 'https';
 import { config } from './config';
 import { bot } from './bot';
-import { saveMapping } from './database';
+import { saveMapping, saveTopic, getTopic, deleteTopic } from './database';
 
 export const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -122,14 +122,67 @@ async function downloadAttachment(att: ChatwootAttachment): Promise<{ buffer: Bu
     return { buffer, mimeType: mimeTypeHeader || att.content_type, filename, size, sourceUrl: url };
 }
 
+// ============ Forum Topics 支持 ============
+
+/**
+ * 获取或创建对话对应的 Forum Topic
+ * 如果未配置 Forum 群组则返回 undefined，保持原有行为
+ */
+async function getOrCreateTopic(conversationId: number, accountId: number, senderName: string): Promise<number | undefined> {
+    if (!config.telegramForumChatId) return undefined;
+
+    const existing = getTopic(conversationId);
+    if (existing) return existing.telegram_topic_id;
+
+    try {
+        // 创建新话题，名称包含客户名和对话 ID
+        const topicName = `🗨️ ${senderName} #${conversationId}`;
+        const result = await bot.telegram.createForumTopic(config.telegramForumChatId, topicName);
+        saveTopic(conversationId, accountId, result.message_thread_id, topicName);
+        console.log(`创建新话题: ${topicName} (topic_id: ${result.message_thread_id})`);
+        return result.message_thread_id;
+    } catch (err) {
+        console.error('创建 Forum Topic 失败:', err);
+        return undefined;
+    }
+}
+
+/**
+ * 关闭对话对应的 Forum Topic
+ */
+async function closeTopicForConversation(conversationId: number): Promise<boolean> {
+    if (!config.telegramForumChatId) return false;
+
+    const topic = getTopic(conversationId);
+    if (!topic) return false;
+
+    try {
+        await bot.telegram.closeForumTopic(config.telegramForumChatId, topic.telegram_topic_id);
+        console.log(`关闭话题: ${topic.topic_name} (topic_id: ${topic.telegram_topic_id})`);
+        return true;
+    } catch (err) {
+        console.error('关闭 Forum Topic 失败:', err);
+        return false;
+    }
+}
+
+// ============ 附件发送 ============
+
 async function sendAttachmentToTelegram(params: {
     chatId: string;
     att: ChatwootAttachment;
     conversationId: number;
     accountId: number;
     chatwootMessageId?: number;
+    messageThreadId?: number;  // Forum Topic ID
 }) {
-    const { chatId, att, conversationId, accountId, chatwootMessageId } = params;
+    const { chatId, att, conversationId, accountId, chatwootMessageId, messageThreadId } = params;
+
+    // 构建发送选项（如果有 topic ID 则添加）
+    const sendOptions: { message_thread_id?: number } = {};
+    if (messageThreadId) {
+        sendOptions.message_thread_id = messageThreadId;
+    }
 
     // 优先尝试让 Telegram 直接拉取 URL（省带宽/内存/CPU）。失败再 fallback 到本地下载+上传。
     const directUrl = pickAttachmentUrl(att);
@@ -137,21 +190,21 @@ async function sendAttachmentToTelegram(params: {
         const kind = guessTelegramSendKind(att, att.content_type);
         try {
             if (kind === 'photo') {
-                const sent = await bot.telegram.sendPhoto(chatId, directUrl);
+                const sent = await bot.telegram.sendPhoto(chatId, directUrl, sendOptions);
                 saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
                 return;
             }
             if (kind === 'video') {
-                const sent = await bot.telegram.sendVideo(chatId, directUrl);
+                const sent = await bot.telegram.sendVideo(chatId, directUrl, sendOptions);
                 saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
                 return;
             }
             if (kind === 'audio') {
-                const sent = await bot.telegram.sendAudio(chatId, directUrl);
+                const sent = await bot.telegram.sendAudio(chatId, directUrl, sendOptions);
                 saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
                 return;
             }
-            const sent = await bot.telegram.sendDocument(chatId, directUrl);
+            const sent = await bot.telegram.sendDocument(chatId, directUrl, sendOptions);
             saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
             return;
         } catch (err) {
@@ -167,7 +220,7 @@ async function sendAttachmentToTelegram(params: {
         console.error('附件下载失败:', err);
         const url = pickAttachmentUrl(att);
         const fallbackText = `📎 附件下载失败：${att.file_name || att.id || ''}\n${url ? `链接：${url}` : ''}`;
-        const sent = await bot.telegram.sendMessage(chatId, fallbackText);
+        const sent = await bot.telegram.sendMessage(chatId, fallbackText, sendOptions);
         saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
         return;
     }
@@ -177,7 +230,8 @@ async function sendAttachmentToTelegram(params: {
         const url = downloaded.sourceUrl || pickAttachmentUrl(att);
         const sent = await bot.telegram.sendMessage(
             chatId,
-            `📎 附件过大，无法直接转发到 Telegram（${Math.ceil(downloaded.size / 1024 / 1024)}MB）\n文件：${downloaded.filename}\n${url ? `下载链接：${url}` : ''}`
+            `📎 附件过大，无法直接转发到 Telegram（${Math.ceil(downloaded.size / 1024 / 1024)}MB）\n文件：${downloaded.filename}\n${url ? `下载链接：${url}` : ''}`,
+            sendOptions
         );
         saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
         return;
@@ -188,16 +242,16 @@ async function sendAttachmentToTelegram(params: {
 
     try {
         if (kind === 'photo') {
-            const sent = await bot.telegram.sendPhoto(chatId, inputFile);
+            const sent = await bot.telegram.sendPhoto(chatId, inputFile, sendOptions);
             saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
         } else if (kind === 'video') {
-            const sent = await bot.telegram.sendVideo(chatId, inputFile);
+            const sent = await bot.telegram.sendVideo(chatId, inputFile, sendOptions);
             saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
         } else if (kind === 'audio') {
-            const sent = await bot.telegram.sendAudio(chatId, inputFile);
+            const sent = await bot.telegram.sendAudio(chatId, inputFile, sendOptions);
             saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
         } else {
-            const sent = await bot.telegram.sendDocument(chatId, inputFile);
+            const sent = await bot.telegram.sendDocument(chatId, inputFile, sendOptions);
             saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
         }
     } catch (err) {
@@ -205,11 +259,14 @@ async function sendAttachmentToTelegram(params: {
         const url = downloaded.sourceUrl || pickAttachmentUrl(att);
         const sent = await bot.telegram.sendMessage(
             chatId,
-            `📎 附件发送失败：${downloaded.filename}\n${url ? `链接：${url}` : ''}`
+            `📎 附件发送失败：${downloaded.filename}\n${url ? `链接：${url}` : ''}`,
+            sendOptions
         );
         saveMapping(sent.message_id, conversationId, accountId, chatwootMessageId);
     }
 }
+
+// ============ 消息处理 ============
 
 async function handleMessageCreated(event: any) {
     const messageType = event?.message_type;
@@ -223,9 +280,22 @@ async function handleMessageCreated(event: any) {
     const attachments = extractAttachments(event);
     const messageContent = event?.content || (attachments.length > 0 ? '[附件]' : '[无内容]');
     const senderName = event?.sender?.name || '未知';
-    const senderEmail = event?.sender?.email || ''; // outgoing usually has no email or agent email
+    const senderEmail = event?.sender?.email || '';
 
-    // Distinct format for Incoming vs Outgoing
+    // 尝试获取或创建 Forum Topic（如果配置了 Forum 群组）
+    const topicId = await getOrCreateTopic(conversationId, accountId, senderName);
+    const isForumMode = !!topicId && !!config.telegramForumChatId;
+
+    // 目标聊天 ID 和消息选项
+    const chatId = isForumMode ? config.telegramForumChatId : config.telegramAdminId;
+    const sendOptions: { parse_mode: 'Markdown'; message_thread_id?: number; reply_markup?: any } = {
+        parse_mode: 'Markdown',
+    };
+    if (topicId) {
+        sendOptions.message_thread_id = topicId;
+    }
+
+    // 消息格式
     let text = '';
     const attachmentHint = attachments.length > 0 ? `\n📎 附件：${attachments.length} 个` : '';
     if (messageType === 'incoming') {
@@ -234,31 +304,39 @@ async function handleMessageCreated(event: any) {
         text = `🤖 **${senderName}** (客服/AI)\n📤 ${messageContent}${attachmentHint}`;
     }
 
-    try {
-        // Add Inline Keyboard to Resolve conversation
-        const sentMessage = await bot.telegram.sendMessage(config.telegramAdminId, text, {
-            parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [
-                    [
-                        { text: '✅ 标记已解决', callback_data: 'resolve' },
-                        { text: '在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
-                    ],
-                ],
-            },
-        });
+    // 构建按钮
+    const inlineKeyboard = [];
+    if (isForumMode) {
+        // Forum 模式：添加关闭话题按钮
+        inlineKeyboard.push([
+            { text: '✅ 标记已解决', callback_data: `resolve:${conversationId}:${accountId}` },
+            { text: '🔒 关闭话题', callback_data: `close_topic:${conversationId}` },
+        ]);
+    } else {
+        // 原有模式
+        inlineKeyboard.push([
+            { text: '✅ 标记已解决', callback_data: 'resolve' },
+        ]);
+    }
+    inlineKeyboard.push([
+        { text: '在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
+    ]);
 
-        // Save mapping so we can reply later（头部消息）
+    sendOptions.reply_markup = { inline_keyboard: inlineKeyboard };
+
+    try {
+        const sentMessage = await bot.telegram.sendMessage(chatId, text, sendOptions);
         saveMapping(sentMessage.message_id, conversationId, accountId, event?.id);
 
         // 发送附件（如有）
         await mapWithConcurrencyLimit(attachments, ATTACHMENT_CONCURRENCY, async (att) => {
             await sendAttachmentToTelegram({
-                chatId: config.telegramAdminId,
+                chatId,
                 att,
                 conversationId,
                 accountId,
                 chatwootMessageId: event?.id,
+                messageThreadId: topicId,
             });
         });
     } catch (error) {
@@ -266,17 +344,41 @@ async function handleMessageCreated(event: any) {
     }
 }
 
+/**
+ * 处理对话状态变更（如 resolved）
+ */
+async function handleConversationStatusChanged(event: any) {
+    const conversationId = event?.id || event?.conversation?.id;
+    const status = event?.status;
+
+    if (!conversationId) return;
+
+    // 当对话被标记为 resolved 时，关闭对应的 Forum Topic
+    if (status === 'resolved') {
+        const closed = await closeTopicForConversation(conversationId);
+        if (closed) {
+            console.log(`对话 #${conversationId} 已解决，话题已关闭`);
+        }
+    }
+}
+
+// ============ Webhook 路由 ============
+
 app.post('/webhook', (req, res) => {
     const event = req.body;
     // 先快速 ACK，避免 Chatwoot 因下载附件导致超时重试
     res.sendStatus(200);
 
-    if (event?.event !== 'message_created') return;
-    void handleMessageCreated(event);
+    const eventType = event?.event;
+
+    if (eventType === 'message_created') {
+        void handleMessageCreated(event);
+    } else if (eventType === 'conversation_status_changed') {
+        void handleConversationStatusChanged(event);
+    }
 });
 
-// 仅用于本地快速验证（不会影响生产逻辑）
-// 运行方式：
-//   node -e "require('./dist/server').__debugHandleMessageCreated(require('./mock.json'))"
-// 你也可以在 TS 环境用 ts-node 直接调用该函数。
+// 导出供测试使用
 export const __debugHandleMessageCreated = handleMessageCreated;
+export { closeTopicForConversation };
+

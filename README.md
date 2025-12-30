@@ -29,6 +29,12 @@
   - 通过消息引用机制，完美支持多个客户同时对话
   - SQLite 数据库持久化消息映射关系
 
+- 💬 **Forum Topics 会话隔离**（新功能）
+  - 每个客户对话自动创建独立话题
+  - 彻底解决多用户同时对话时消息混乱问题
+  - 对话结束时自动关闭话题
+  - 支持手动关闭话题
+
 - 🎯 **便捷操作**
   - 一键标记会话为"已解决"
   - 快速跳转到 Chatwoot 查看完整对话历史
@@ -120,6 +126,7 @@ docker-compose up -d --build
 | `CHATWOOT_ACCESS_TOKEN` | Chatwoot API 访问令牌 | 在 Profile Settings → Access Token 获取 |
 | `CHATWOOT_BASE_URL` | Chatwoot 实例地址 | `https://app.chatwoot.com` |
 | `CHATWOOT_ACCOUNT_ID` | Chatwoot 账户 ID | 通常为 `1` |
+| `TELEGRAM_FORUM_CHAT_ID` | Forum 群组 ID（可选） | 启用话题隔离功能 |
 
 ### 获取 Telegram Bot Token
 
@@ -148,7 +155,7 @@ docker-compose up -d --build
 3. 点击 **"Add new webhook"**
 4. 配置 Webhook：
    - **Webhook URL**: `http://你的服务器IP:3000/webhook`
-   - **Events**: 勾选 `message_created`
+   - **Events**: 勾选 `message_created` 和 `conversation_status_changed`
 5. 保存
 
 ### ⚠️ 重要：Nginx 配置
@@ -177,6 +184,33 @@ sudo systemctl reload nginx
 ```
 
 ## 📱 使用指南
+
+### 🆕 启用 Forum Topics（话题隔离模式）
+
+为解决多用户同时对话时消息混乱的问题，可启用 Telegram Forum Topics 功能：
+
+**前提条件：**
+1. 创建一个 Telegram **超级群组**
+2. 在群组设置中启用 **Topics**（话题）功能
+3. 将 Bot 添加为群组**管理员**，并授予 `can_manage_topics` 权限
+
+**配置步骤：**
+
+1. 获取群组 Chat ID（可通过 [@RawDataBot](https://t.me/RawDataBot) 获取，通常为 `-100xxxxxxxxxx` 格式）
+2. 在 `.env` 中添加：
+   ```bash
+   TELEGRAM_FORUM_CHAT_ID=-100xxxxxxxxxx
+   ```
+3. 确保 Chatwoot Webhook 勾选了 `conversation_status_changed` 事件
+4. 重启服务
+
+**使用说明：**
+- 新客户消息会自动在群组中创建话题（格式：`🗨️ 客户名 #对话ID`）
+- 在话题内直接发送消息即可回复客户（无需引用）
+- 点击 **"✅ 标记已解决"** 后，话题会自动关闭
+- 点击 **"🔒 关闭话题"** 可手动关闭话题
+
+---
 
 ### 接收客户消息
 
