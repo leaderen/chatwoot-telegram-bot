@@ -7,7 +7,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # 镜像名称必须全小写
+  IMAGE_NAME: shannon-x/chatwoot-telegram-bot
 
 jobs:
   build:
@@ -15,6 +16,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      attestations: write
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -49,6 +52,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
 
       - name: Image digest
         run: echo "Docker image pushed to ghcr.io successfully!"
