@@ -138,12 +138,60 @@ async function getOrCreateTopic(conversationId: number, accountId: number, sende
         // 创建新话题，名称包含客户名和对话 ID
         const topicName = `🗨️ ${senderName} #${conversationId}`;
         const result = await bot.telegram.createForumTopic(config.telegramForumChatId, topicName);
-        saveTopic(conversationId, accountId, result.message_thread_id, topicName);
-        console.log(`创建新话题: ${topicName} (topic_id: ${result.message_thread_id})`);
-        return result.message_thread_id;
+        const topicId = result.message_thread_id;
+        saveTopic(conversationId, accountId, topicId, topicName);
+        console.log(`创建新话题: ${topicName} (topic_id: ${topicId})`);
+
+        // 发送欢迎消息（带 Inline Keyboard）
+        await sendWelcomeMessage(conversationId, accountId, topicId);
+
+        return topicId;
     } catch (err) {
         console.error('创建 Forum Topic 失败:', err);
         return undefined;
+    }
+}
+
+/**
+ * 构建 Forum 模式下的 Inline Keyboard
+ * 注意：ReplyKeyboardMarkup 在 Forum Topics 中不起作用（Telegram API 限制）
+ * 因此改用 InlineKeyboardMarkup，它会附加在每条消息上
+ */
+function buildForumInlineKeyboard(conversationId: number, accountId: number) {
+    return {
+        inline_keyboard: [
+            [
+                { text: '✅ 标记已解决', callback_data: `resolve:${conversationId}:${accountId}` },
+                { text: '🔓 重新打开', callback_data: `reopen:${conversationId}:${accountId}` },
+            ],
+            [
+                { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
+            ],
+        ],
+    };
+}
+
+/**
+ * 发送欢迎消息（带 Inline Keyboard）
+ */
+async function sendWelcomeMessage(conversationId: number, accountId: number, topicId: number) {
+    if (!config.telegramForumChatId) return;
+
+    const welcomeText = `💬 **新对话已开始**\n\n点击下方按钮管理此对话：`;
+
+    try {
+        await bot.telegram.sendMessage(
+            config.telegramForumChatId,
+            welcomeText,
+            {
+                message_thread_id: topicId,
+                parse_mode: 'Markdown',
+                reply_markup: buildForumInlineKeyboard(conversationId, accountId),
+            }
+        );
+        console.log(`话题欢迎消息已发送 (topic_id: ${topicId})`);
+    } catch (err) {
+        console.error('发送欢迎消息失败:', err);
     }
 }
 
@@ -304,25 +352,22 @@ async function handleMessageCreated(event: any) {
         text = `🤖 **${senderName}** (客服/AI)\n📤 ${messageContent}${attachmentHint}`;
     }
 
-    // 构建按钮
-    const inlineKeyboard = [];
+    // 为消息附加 Inline Keyboard（Forum 模式和原有模式都适用）
     if (isForumMode) {
-        // Forum 模式：添加关闭话题按钮
-        inlineKeyboard.push([
-            { text: '✅ 标记已解决', callback_data: `resolve:${conversationId}:${accountId}` },
-            { text: '🔒 关闭话题', callback_data: `close_topic:${conversationId}` },
-        ]);
+        // Forum 模式：使用带 conversationId 的 callback_data，支持更多操作
+        sendOptions.reply_markup = buildForumInlineKeyboard(conversationId, accountId);
     } else {
-        // 原有模式
-        inlineKeyboard.push([
-            { text: '✅ 标记已解决', callback_data: 'resolve' },
-        ]);
+        // 原有模式：简化的 inline keyboard
+        const inlineKeyboard = [
+            [
+                { text: '✅ 标记已解决', callback_data: 'resolve' },
+            ],
+            [
+                { text: '📱 在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
+            ],
+        ];
+        sendOptions.reply_markup = { inline_keyboard: inlineKeyboard };
     }
-    inlineKeyboard.push([
-        { text: '在 Chatwoot 中查看', url: `${config.chatwootBaseUrl}/app/accounts/${accountId}/conversations/${conversationId}` },
-    ]);
-
-    sendOptions.reply_markup = { inline_keyboard: inlineKeyboard };
 
     try {
         const sentMessage = await bot.telegram.sendMessage(chatId, text, sendOptions);
@@ -339,8 +384,27 @@ async function handleMessageCreated(event: any) {
                 messageThreadId: topicId,
             });
         });
-    } catch (error) {
+    } catch (error: any) {
         console.error('Failed to send message to Telegram:', error);
+
+        // 处理话题已删除的情况
+        if (error?.response?.description?.includes('TOPIC_DELETED') || error?.message?.includes('TOPIC_DELETED')) {
+            console.log(`检测到话题已删除 (conversation_id: ${conversationId})，清理数据库映射`);
+            deleteTopic(conversationId);
+
+            // 尝试创建新话题并重新发送
+            try {
+                const newTopicId = await getOrCreateTopic(conversationId, accountId, senderName);
+                if (newTopicId && config.telegramForumChatId) {
+                    console.log(`为对话 ${conversationId} 创建了新话题 (topic_id: ${newTopicId})，重新发送消息`);
+                    const newSendOptions = { ...sendOptions, message_thread_id: newTopicId };
+                    const sentMessage = await bot.telegram.sendMessage(config.telegramForumChatId, text, newSendOptions);
+                    saveMapping(sentMessage.message_id, conversationId, accountId, event?.id);
+                }
+            } catch (retryError) {
+                console.error('重新创建话题并发送消息失败:', retryError);
+            }
+        }
     }
 }
 
